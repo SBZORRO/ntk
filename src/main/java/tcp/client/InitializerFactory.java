@@ -1,5 +1,6 @@
 package tcp.client;
 
+import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
@@ -201,11 +202,15 @@ public class InitializerFactory {
   }
 
   public static class MyReaderInitializer extends ChannelInitializer<NioSocketChannel> {
+    
+    Bootstrap bootstrap;
     ITcpReader r;
 
-    public MyReaderInitializer(ITcpReader r) {
+    public MyReaderInitializer(Bootstrap bootstrap, ITcpReader r) {
+      this.bootstrap = bootstrap;
       this.r = r;
     }
+
 
     @Override
     protected void initChannel(NioSocketChannel ch) throws Exception {
@@ -214,7 +219,7 @@ public class InitializerFactory {
 //              new LengthFieldBasedFrameDecoder(1024, 8, 1, 0, 0));
       ch.pipeline().addLast(decoder, new JsonObjectDecoder());
       ch.pipeline().addLast(reader, new TcpChannelHandler(r));
-      ch.pipeline().addLast(rcnct, new TcpReconnectHandler());
+      ch.pipeline().addLast(rcnct, new ConnectHandler(bootstrap));
       ch.pipeline().addLast(out, new ChannelOutboundHandlerAdapter());
     }
   }

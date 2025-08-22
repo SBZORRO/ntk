@@ -12,9 +12,9 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.epoll.EpollChannelOption;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.socket.nio.NioDatagramChannel;
-import tcp.client.NettyWrapper;
+import tcp.client.NettyClient;
 
-public class UdpClient extends NettyWrapper {
+public class UdpClient extends NettyClient {
 
   public UdpClient() {}
 
@@ -45,7 +45,7 @@ public class UdpClient extends NettyWrapper {
 
   @Override
   public void send(String msg) throws InterruptedException {
-    NettyWrapper.LAST_CMD.put(this.host(), msg);
+    NettyClient.LAST_CMD.put(this.host(), msg);
     LogUtil.SOCK.info(LogUtil.SOCK_MARKER, this.host() + " <<< " + msg);
 
     if (HexByteUtil.isHex(msg)) {

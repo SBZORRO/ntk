@@ -1,5 +1,6 @@
 package mqtt.core;
 
+import java.net.InetSocketAddress;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Map;
@@ -9,12 +10,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import com.sbzorro.LogUtil;
 
+import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.mqtt.MqttConnectPayload;
 import io.netty.handler.codec.mqtt.MqttConnectVariableHeader;
+import io.netty.handler.codec.mqtt.MqttDecoder;
+import io.netty.handler.codec.mqtt.MqttEncoder;
 import io.netty.handler.codec.mqtt.MqttFixedHeader;
 import io.netty.handler.codec.mqtt.MqttMessage;
 import io.netty.handler.codec.mqtt.MqttMessageIdVariableHeader;
@@ -27,10 +33,13 @@ import io.netty.handler.codec.mqtt.MqttSubscribePayload;
 import io.netty.handler.codec.mqtt.MqttTopicSubscription;
 import io.netty.handler.codec.mqtt.MqttUnsubscribeMessage;
 import io.netty.handler.codec.mqtt.MqttUnsubscribePayload;
+import io.netty.handler.logging.LoggingHandler;
+import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.util.collection.IntObjectHashMap;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.Promise;
-import tcp.client.TcpClient;
+import mqtt.client.MqttConnectionListener;
+import mqtt.client.MqttReconnectHandler;
 
 public class MqttClientImpl {
 
@@ -49,16 +58,11 @@ public class MqttClientImpl {
 
   protected Promise<BeanMqttConnectResult> connectFuture;
 
-  TcpClient tcpClient;
   BeanMqttClientConfig config;
+  ChannelFuture future;
 
-  public MqttClientImpl(TcpClient tcpClient, BeanMqttClientConfig config) {
-    this.tcpClient = tcpClient;
+  public MqttClientImpl(BeanMqttClientConfig config) {
     this.config = config;
-  }
-
-  public Channel channel() {
-    return tcpClient.channel();
   }
 
   public Future<Void> on(String topic, IMqttHandler handler) {
@@ -83,7 +87,8 @@ public class MqttClientImpl {
 
   public Future<Void> off(String topic) {
     subStrSet.remove(topic);
-    subBeanSet.remove(topicToSub.remove(topic));;
+    subBeanSet.remove(topicToSub.remove(topic));
+    ;
     return this.sendUnsub(topic);
   }
 
@@ -101,8 +106,8 @@ public class MqttClientImpl {
 
   public static AtomicInteger total = new AtomicInteger(100);
 
-  public Future<Void>
-      sendPub(String topic, ByteBuf payload, MqttQoS qos, boolean retain) {
+  public Future<Void> sendPub(String topic, ByteBuf payload, MqttQoS qos,
+      boolean retain) {
     MqttFixedHeader fixedHeader = new MqttFixedHeader(MqttMessageType.PUBLISH,
         false, qos, retain, 0);
     MqttPublishVariableHeader variableHeader = new MqttPublishVariableHeader(
@@ -111,9 +116,9 @@ public class MqttClientImpl {
         variableHeader, payload);
 
     if (qos == MqttQoS.AT_MOST_ONCE) {
-      return this.tcpClient.writeAndFlush(message);
+      return future.channel().writeAndFlush(message);
     } else {
-      return this.tcpClient.writeAndFlush(message)
+      return future.channel().writeAndFlush(message)
           .addListener((ChannelFutureListener) f -> {
             LogUtil.SOCK.info("pub::::"
                 + total.incrementAndGet()
@@ -132,8 +137,8 @@ public class MqttClientImpl {
   }
 
   // store sub directly, set active = false
-  private Future<Void>
-      createSubscribtion(String topic, IMqttHandler handler, MqttQoS qos) {
+  private Future<Void> createSubscribtion(String topic, IMqttHandler handler,
+      MqttQoS qos) {
     BeanSub subscribtion = null;
     if (!subStrSet.contains(topic)) {
       subscribtion = new BeanSub(topic, handler);
@@ -155,7 +160,7 @@ public class MqttClientImpl {
     MqttSubscribeMessage message = new MqttSubscribeMessage(fixedHeader,
         variableHeader, payload);
 
-    return this.tcpClient.writeAndFlush(message)
+    return future.channel().writeAndFlush(message)
         .addListener((ChannelFutureListener) f -> {
           pendingSubs.put(message.variableHeader().messageId(),
               RetransmissionHandlerFactory.newSubscribeHandler(f, message));
@@ -171,7 +176,7 @@ public class MqttClientImpl {
     MqttUnsubscribeMessage message = new MqttUnsubscribeMessage(fixedHeader,
         variableHeader, payload);
 
-    return this.tcpClient.writeAndFlush(message)
+    return future.channel().writeAndFlush(message)
         .addListener((ChannelFutureListener) f -> {
           pendingUnsubs.put(message.variableHeader().messageId(),
               RetransmissionHandlerFactory.newUnsubscribeHandler(f, message));
@@ -194,8 +199,7 @@ public class MqttClientImpl {
     return MqttMessageIdVariableHeader.from(messageId & 0x0000ffff);
   }
 
-  public IntObjectHashMap<RtnsHandler<MqttUnsubscribeMessage>>
-      pendingUnsubs() {
+  public IntObjectHashMap<RtnsHandler<MqttUnsubscribeMessage>> pendingUnsubs() {
     return pendingUnsubs;
   }
 
@@ -238,18 +242,18 @@ public class MqttClientImpl {
   public MqttConnectVariableHeader mqttConnectVariableHeader() {
 
     return new MqttConnectVariableHeader(
-        config.getProtocolVersion().protocolName(),  // Protocol Name
+        config.getProtocolVersion().protocolName(), // Protocol Name
         config.getProtocolVersion().protocolLevel(), // Protocol Level
-        config.getUsername() != null,                // Has Username
-        config.getPassword() != null,                // Has Password
-        config.getLastWill() != null                 // Will Retain
+        config.getUsername() != null, // Has Username
+        config.getPassword() != null, // Has Password
+        config.getLastWill() != null // Will Retain
             && config.getLastWill().isRetain(),
-        config.getLastWill() != null                 // Will QOS
+        config.getLastWill() != null // Will QOS
             ? config.getLastWill().getQos().value()
             : 0,
-        config.getLastWill() != null,                // Has Will
-        config.isCleanSession(),                     // Clean Session
-        config.getTimeoutSeconds()                   // Timeout
+        config.getLastWill() != null, // Has Will
+        config.isCleanSession(), // Clean Session
+        config.getTimeoutSeconds() // Timeout
     );
   }
 
@@ -264,4 +268,43 @@ public class MqttClientImpl {
             ? config.getPassword().getBytes()
             : new byte[0]);
   }
+
+  private static class MqttChannelInitializer
+      extends ChannelInitializer<NioSocketChannel> {
+    MqttClientImpl impl;
+    int timeout;
+
+    MqttChannelInitializer(MqttClientImpl impl, int timeout) {
+      this.impl = impl;
+      this.timeout = timeout;
+    }
+
+    protected void initChannel(NioSocketChannel ch) throws Exception {
+      ch.pipeline().addLast("log4j", new LoggingHandler());
+      ch.pipeline().addLast("reconnector", new MqttReconnectHandler());
+      ch.pipeline().addLast("mqttDecoder", new MqttDecoder(1024_000));
+      ch.pipeline().addLast("mqttEncoder", MqttEncoder.INSTANCE);
+      ch.pipeline().addLast("idleStateHandler",
+          new IdleStateHandler(timeout, timeout, 0));
+      ch.pipeline().addLast("mqttPingHandler", new MqttPingHandler(timeout));
+      ch.pipeline().addLast("mqttHandler",
+          new MqttChannelHandler(impl));
+    }
+  }
+
+  public MqttClientImpl bootstrap(String host, int port) {
+    Bootstrap bootstrap = new Bootstrap();
+    bootstrap.group(new NioEventLoopGroup(1));
+    bootstrap.channel(NioSocketChannel.class);
+//  bootstrap.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, OPTION_TCP_TIMEOUT);
+//    bootstrap.option(ChannelOption.SO_RCVBUF, 1024_000_000);
+    bootstrap.remoteAddress(InetSocketAddress.createUnresolved(host, port));
+    bootstrap
+        .handler(new MqttChannelInitializer(this, config.getTimeoutSeconds()));
+    this.future = bootstrap.connect()
+        .addListener(new MqttConnectionListener());
+
+    return this;
+  }
+
 }

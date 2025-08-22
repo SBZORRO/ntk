@@ -26,7 +26,7 @@ public final class CdlHandler extends ChannelInboundHandlerAdapter {
         latch.getCount() + " :: Read Complete");
   }
 
-  public boolean await(NettyWrapper client, long timeout, TimeUnit unit)
+  public boolean await(NettyClient client, long timeout, TimeUnit unit)
       throws InterruptedException {
     boolean to = latch.await(timeout, unit);
     if (latch.getCount() == 0 || type == 1) {
@@ -38,7 +38,7 @@ public final class CdlHandler extends ChannelInboundHandlerAdapter {
     return to;
   }
 
-  public void remove(NettyWrapper client) {
+  public void remove(NettyClient client) {
     client.removeHandler(this);
   }
 
